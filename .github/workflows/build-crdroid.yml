@@ -1,0 +1,94 @@
+name: Build crDroid GSI (arm64, arm, a64) + MicroG
+
+on:
+  workflow_dispatch: # Permite iniciar la compilación manualmente desde GitHub
+
+jobs:
+  build-gsi:
+    name: Build ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    # Advertencia: Para compilar Android, es altamente probable que necesites un self-hosted runner.
+    
+    strategy:
+      fail-fast: false # Si falla una arquitectura, las otras seguirán compilándose
+      matrix:
+        arch: [arm64, arm, a64]
+
+    steps:
+      # Paso indispensable en GitHub Actions para compilar Android: Liberar espacio
+      - name: Maximize Build Space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: false # Necesitamos el SDK de Android
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Checkout del repositorio GSI
+        uses: actions/checkout@v4
+
+      - name: Configurar Entorno de Compilación
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc build-essential git-core gnupg gperf libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3-pip
+          mkdir -p ~/bin
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Inicializar y Sincronizar Repo de crDroid
+        run: |
+          git config --global user.email "bot@githubactions.com"
+          git config --global user.name "GitHub Actions"
+          mkdir -p workspace/crdroid-gsi && cd workspace/crdroid-gsi
+          
+          # Inicializar el código fuente de crDroid
+          repo init -u https://github.com/crdroidandroid/android.git -b 14.0 --depth=1
+          repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+
+      - name: Aplicar Patches y Añadir MicroG
+        run: |
+          cd workspace/crdroid-gsi
+          
+          # 1. Aplicar los parches del repositorio de GSI (basado en la imagen que subiste)
+          # Esto asume que el repo de github contiene los parches necesarios
+          cp -r $GITHUB_WORKSPACE/patches .
+          cp $GITHUB_WORKSPACE/crDroid.mk .
+          # Aquí iría el comando para ejecutar tus parches, por ejemplo:
+          # bash apply_patches.sh
+          
+          # 2. Integrar MicroG usando el vendor oficial de MicroG para Android
+          git clone https://github.com/microg/android_vendor_microg.git vendor/microg
+          
+          # Añadir MicroG al archivo de compilación
+          echo '$(call inherit-product, vendor/microg/microg.mk)' >> build/make/target/product/handheld_system.mk
+
+      - name: Configurar e Iniciar Compilación
+        run: |
+          cd workspace/crdroid-gsi
+          source build/envsetup.sh
+          
+          # Determinar el target de 'lunch' basado en la variable de la matriz
+          # IMPORTANTE: Reemplaza "treble_" por el prefijo exacto que use crDroid.mk en tu repositorio
+          TARGET_NAME="treble_${{ matrix.arch }}-userdebug"
+          
+          echo "Iniciando compilación para: $TARGET_NAME"
+          lunch $TARGET_NAME
+          
+          # Compilar solo la imagen del sistema (GSI)
+          make systemimage -j$(nproc --all)
+
+      - name: Comprimir GSI
+        run: |
+          cd workspace/crdroid-gsi/out/target/product/*/
+          xz -9 -T0 system.img
+          mv system.img.xz crDroid-14-${{ matrix.arch }}-MicroG.img.xz
+
+      - name: Subir Artifacto (Imagen compilada)
+        uses: actions/upload-artifact@v4
+        with:
+          name: crDroid-GSI-${{ matrix.arch }}-MicroG
+          path: workspace/crdroid-gsi/out/target/product/*/crDroid-14-${{ matrix.arch }}-MicroG.img.xz
